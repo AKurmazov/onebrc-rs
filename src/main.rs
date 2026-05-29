@@ -2,30 +2,32 @@ use memchr::memchr_iter;
 use memmap2::Mmap;
 use std::sync::Arc;
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+// use std::time::{SystemTime, UNIX_EPOCH};
 use std::{collections::HashMap, fs::File};
 
+const THREAD_N: u8 = 12;
+
 fn main() -> std::io::Result<()> {
-    let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    // let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let file = File::open("measurements.txt")?;
     let mmap = Arc::new(unsafe { Mmap::map(&file)? });
-
-    let threads_num: usize = 12;
+    let mmap_len = mmap.len();
     let mut threads_handles: Vec<thread::JoinHandle<HashMap<String, (f32, f32, i32, f32)>>> =
         Vec::new();
-    let rows_num: usize = 1_000_000_000;
 
-    for thread_id in 1..threads_num + 1 {
-        let left_bound = rows_num / threads_num * (thread_id - 1);
-        let mut right_bound = rows_num / threads_num * thread_id;
+    let mut bounds: [u64; THREAD_N as usize + 1] = [0; THREAD_N as usize + 1];
+    for thread_id in 1..THREAD_N + 1 {
+        let right_bound_naive = mmap_len as u64 / THREAD_N as u64 * thread_id as u64;
+        bounds[thread_id as usize] = find_next_newline_pos(right_bound_naive, &mmap);
+    }
 
-        if thread_id == threads_num {
-            right_bound += rows_num % threads_num;
-        }
+    for thread_id in 1..THREAD_N + 1 {
+        let left_bound = bounds[thread_id as usize - 1] as usize;
+        let right_bound = bounds[thread_id as usize] as usize;
 
         let mmap_clone = Arc::clone(&mmap);
         threads_handles.push(thread::spawn(move || {
-            return process_lines(thread_id, left_bound, right_bound, mmap_clone);
+            process_lines(&mmap_clone[left_bound..right_bound])
         }));
     }
 
@@ -35,44 +37,35 @@ fn main() -> std::io::Result<()> {
         stations = merge_stations(stations, joined_stations);
     }
 
-    print_output(&stations);
+    // print_output(&stations);
 
-    let end = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-    let diff = end - start;
-    println!(
-        "\nElapsed: {} s {} ms",
-        diff.as_secs(),
-        diff.subsec_millis()
-    );
+    // let end = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    // let diff = end - start;
+    // println!(
+    //     "\nElapsed: {} s {} ms",
+    //     diff.as_secs(),
+    //     diff.subsec_millis()
+    // );
 
     Ok(())
 }
 
-fn process_lines(
-    thread_id: usize,
-    left_bound: usize,
-    right_bound: usize,
-    mmap: Arc<Mmap>,
-) -> HashMap<String, (f32, f32, i32, f32)> {
-    let mut stations: HashMap<String, (f32, f32, i32, f32)> = HashMap::new();
-
-    let mut line_start = 0;
-    let mut lines_done = 0;
-    for (i, newline_pos) in memchr_iter(b'\n', &mmap).enumerate() {
-        if !(i >= left_bound && i <= right_bound) {
-            line_start = newline_pos + 1;
-            continue;
+fn find_next_newline_pos(mut current_pos: u64, mmap: &Mmap) -> u64 {
+    loop {
+        if *mmap.get(current_pos as usize).unwrap() == b'\n' {
+            return current_pos + 1;
         }
+        current_pos += 1;
+    }
+}
 
+fn process_lines(mmap: &[u8]) -> HashMap<String, (f32, f32, i32, f32)> {
+    let mut stations: HashMap<String, (f32, f32, i32, f32)> = HashMap::new();
+    let mut line_start = 0;
+    for newline_pos in memchr_iter(b'\n', &mmap) {
         let line: &[u8] = &mmap[line_start..newline_pos];
         process_line(line, &mut stations);
-
         line_start = newline_pos + 1;
-
-        lines_done += 1;
-        if lines_done % 1_000_000 == 0 {
-            println!("[{}] Done {} lines!", thread_id, lines_done)
-        }
     }
 
     stations
