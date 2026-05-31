@@ -1,13 +1,15 @@
 use memmap2::Mmap;
-// use rapidhash::{HashMapExt, RapidHashMap};
-use rapidhash::fast::{HashMapExt, RapidHashMap};
 use std::fs::File;
 use std::sync::Arc;
 use std::thread;
 
 const THREAD_N: u8 = 12;
 
+#[derive(Copy, Clone)]
 struct Aggregate {
+    key: [u8; 100],
+    hash: u64,
+
     min: i32,
     max: i32,
     acc: i32,
@@ -15,11 +17,9 @@ struct Aggregate {
 }
 
 fn main() -> std::io::Result<()> {
-    // let start = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
     let file = File::open("measurements.txt")?;
     let mmap = Arc::new(unsafe { Mmap::map(&file)? });
-    let mut threads_handles: Vec<thread::JoinHandle<RapidHashMap<[u8; 100], Aggregate>>> =
-        Vec::new();
+    let mut threads_handles: Vec<thread::JoinHandle<Box<[Aggregate]>>> = Vec::new();
 
     let mut bounds: [u64; THREAD_N as usize + 1] = [0; THREAD_N as usize + 1];
     for thread_id in 1..THREAD_N + 1 {
@@ -37,7 +37,18 @@ fn main() -> std::io::Result<()> {
         }));
     }
 
-    let mut stations: RapidHashMap<[u8; 100], Aggregate> = RapidHashMap::new();
+    let mut stations: Box<[Aggregate]> = vec![
+        Aggregate {
+            key: [59; 100],
+            hash: 0,
+            min: -1000,
+            max: 1000,
+            acc: 0,
+            count: 0,
+        };
+        16384
+    ]
+    .into_boxed_slice();
     for handle in threads_handles {
         let joined_stations = handle.join().unwrap();
         stations = merge_stations(stations, joined_stations);
@@ -59,11 +70,23 @@ fn find_next_newline_pos(mut current_pos: u64, mmap: &Mmap) -> u64 {
     }
 }
 
-fn process_lines(mmap: &[u8]) -> RapidHashMap<[u8; 100], Aggregate> {
-    let mut stations: RapidHashMap<[u8; 100], Aggregate> = RapidHashMap::new();
+fn process_lines(mmap: &[u8]) -> Box<[Aggregate]> {
+    let mut stations: Box<[Aggregate]> = vec![
+        Aggregate {
+            key: [59; 100],
+            hash: 0,
+            min: -1000,
+            max: 1000,
+            acc: 0,
+            count: 0,
+        };
+        16384
+    ]
+    .into_boxed_slice();
 
     let mut station_acc: [u8; 100] = [59; 100];
     let mut station_cnt: u8 = 0;
+    let mut station_hsh: u64 = 5381;
     let mut station_flg: bool = false;
 
     let mut float_acc: i32 = 0;
@@ -74,10 +97,11 @@ fn process_lines(mmap: &[u8]) -> RapidHashMap<[u8; 100], Aggregate> {
 
         if *b == b'\n' {
             float_acc *= float_sign as i32;
-            process_line(station_acc, float_acc, &mut stations);
+            stations = process_line(station_acc, station_hsh, float_acc, stations);
 
             station_acc = [59; 100];
             station_cnt = 0;
+            station_hsh = 5381;
             station_flg = false;
 
             float_acc = 0;
@@ -88,6 +112,7 @@ fn process_lines(mmap: &[u8]) -> RapidHashMap<[u8; 100], Aggregate> {
             if !station_flg {
                 station_acc[station_cnt as usize] = *b;
                 station_cnt += 1;
+                station_hsh = ((station_hsh << 5) + station_hsh) + *b as u64;
             } else if *b == b'-' {
                 float_sign = -1;
             } else if *b == b'.' {
@@ -104,72 +129,103 @@ fn process_lines(mmap: &[u8]) -> RapidHashMap<[u8; 100], Aggregate> {
 
 fn process_line(
     station: [u8; 100],
+    station_hsh: u64,
     temperature: i32,
-    stations: &mut RapidHashMap<[u8; 100], Aggregate>,
-) {
+    mut stations: Box<[Aggregate]>,
+) -> Box<[Aggregate]> {
+    let mut station_ind = station_hsh as usize;
+    loop {
+        station_ind &= 16384 - 1;
+        if stations[station_ind].key == [59; 100] {
+            stations[station_ind] = Aggregate {
+                key: station,
+                hash: station_hsh,
+                min: temperature,
+                max: temperature,
+                acc: temperature,
+                count: 1,
+            };
+            break;
+        } else if stations[station_ind].key == station {
+            let current_agg = &stations[station_ind];
+            stations[station_ind] = Aggregate {
+                key: current_agg.key,
+                hash: current_agg.hash,
+                min: i32::min(current_agg.min, temperature),
+                max: i32::max(current_agg.max, temperature),
+                acc: current_agg.acc + temperature,
+                count: current_agg.count + 1,
+            };
+            break;
+        } else {
+            station_ind += 1;
+        }
+    }
+
     stations
-        .entry(station)
-        .and_modify(|a| {
-            a.min = i32::min(a.min, temperature);
-            a.max = i32::max(a.max, temperature);
-            a.count += 1;
-            a.acc += temperature;
-        })
-        .or_insert(Aggregate {
-            min: temperature,
-            max: temperature,
-            acc: temperature,
-            count: 1,
-        });
 }
 
 fn merge_stations(
-    mut station1: RapidHashMap<[u8; 100], Aggregate>,
-    station2: RapidHashMap<[u8; 100], Aggregate>,
-) -> RapidHashMap<[u8; 100], Aggregate> {
-    for (k, oa) in station2 {
-        station1
-            .entry(k)
-            .and_modify(|ca| {
-                ca.min = i32::min(ca.min, oa.min);
-                ca.max = i32::max(ca.max, oa.max);
-                ca.acc += oa.acc;
-                ca.count += oa.count;
-            })
-            .or_insert(oa);
+    mut stations1: Box<[Aggregate]>,
+    stations2: Box<[Aggregate]>,
+) -> Box<[Aggregate]> {
+    for station in stations2.iter() {
+        if station.key != [59; 100] {
+            let mut station_ind = station.hash as usize;
+            loop {
+                station_ind &= 16384 - 1;
+                if stations1[station_ind].key == [59; 100] {
+                    stations1[station_ind] = *station;
+                    break;
+                } else if stations1[station_ind].key == station.key {
+                    let current_agg = &stations1[station_ind];
+                    stations1[station_ind] = Aggregate {
+                        key: current_agg.key,
+                        hash: current_agg.hash,
+                        min: i32::min(current_agg.min, station.min),
+                        max: i32::max(current_agg.max, station.max),
+                        acc: current_agg.acc + station.acc,
+                        count: current_agg.count + station.count,
+                    };
+                    break;
+                } else {
+                    station_ind += 1;
+                }
+            }
+        }
     }
-
-    station1
+    stations1
 }
 
-fn print_output(stations: &RapidHashMap<[u8; 100], Aggregate>) {
+fn print_output(stations: &[Aggregate]) {
     print!("{{");
-    let mut output_vec = Vec::new();
-    for (k, v) in stations {
-        output_vec.push((k, v));
-    }
+    let mut output_vec: Vec<&Aggregate> = stations.iter().collect();
 
     let mut is_first = true;
-    output_vec.sort_by(|a, b| a.0.cmp(b.0));
-    for (k, a) in output_vec {
+    output_vec.sort_by(|a, b| a.key.cmp(&b.key));
+    for station in output_vec {
+        if station.key == [59; 100] {
+            continue;
+        }
+
         if !is_first {
             print!(", ");
         } else {
             is_first = false;
         }
 
-        let mn = a.min as f32 / 10.0;
-        let mx = a.max as f32 / 10.0;
-        let mean = a.acc as f32 / a.count as f32 / 10.0;
+        let mn = station.min as f32 / 10.0;
+        let mx = station.max as f32 / 10.0;
+        let mean = station.acc as f32 / station.count as f32 / 10.0;
 
         let mut right_bound = 100;
-        for i in 0..k.len() {
-            if k[i] == b';' {
+        for i in 0..station.key.len() {
+            if station.key[i] == b';' {
                 right_bound = i;
                 break;
             }
         }
-        let station = unsafe { std::str::from_utf8_unchecked(&k[..right_bound]) };
+        let station = unsafe { std::str::from_utf8_unchecked(&station.key[..right_bound]) };
         print!("{station}={mn:.1}/{mean:.1}/{mx:.1}");
     }
     print!("}}");
