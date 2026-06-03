@@ -147,15 +147,15 @@ fn process_line(
             };
             break;
         } else if stations[station_ind].key == Some(station) {
-            let current_agg = &stations[station_ind];
-            stations[station_ind] = Aggregate {
-                key: current_agg.key,
-                hash: current_agg.hash,
-                min: i32::min(current_agg.min, temperature),
-                max: i32::max(current_agg.max, temperature),
-                acc: current_agg.acc + temperature,
-                count: current_agg.count + 1,
-            };
+            let current_agg = &mut stations[station_ind];
+            current_agg.acc += temperature;
+            current_agg.count += 1;
+            if current_agg.min > temperature {
+                current_agg.min = temperature;
+            }
+            if current_agg.max < temperature {
+                current_agg.max = temperature;
+            }
             break;
         } else {
             station_ind += 1;
@@ -178,15 +178,15 @@ fn merge_stations(
                     stations1[station_ind] = *station;
                     break;
                 } else if stations1[station_ind].key == station.key {
-                    let current_agg = &stations1[station_ind];
-                    stations1[station_ind] = Aggregate {
-                        key: current_agg.key,
-                        hash: current_agg.hash,
-                        min: i32::min(current_agg.min, station.min),
-                        max: i32::max(current_agg.max, station.max),
-                        acc: current_agg.acc + station.acc,
-                        count: current_agg.count + station.count,
-                    };
+                    let current_agg = &mut stations1[station_ind];
+                    current_agg.acc += station.acc;
+                    current_agg.count += station.count;
+                    if current_agg.min > station.min {
+                        current_agg.min = station.min;
+                    }
+                    if current_agg.max < station.max {
+                        current_agg.max = station.max;
+                    }
                     break;
                 } else {
                     station_ind += 1;
