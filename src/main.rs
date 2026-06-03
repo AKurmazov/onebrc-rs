@@ -7,7 +7,7 @@ const THREAD_N: u8 = 12;
 
 #[derive(Copy, Clone)]
 struct Aggregate {
-    key: [u8; 100],
+    key: Option<[u8; 100]>,
     hash: u64,
 
     min: i32,
@@ -39,7 +39,7 @@ fn main() -> std::io::Result<()> {
 
     let mut stations: Box<[Aggregate]> = vec![
         Aggregate {
-            key: [59; 100],
+            key: None,
             hash: 0,
             min: -1000,
             max: 1000,
@@ -73,7 +73,7 @@ fn find_next_newline_pos(mut current_pos: u64, mmap: &Mmap) -> u64 {
 fn process_lines(mmap: &[u8]) -> Box<[Aggregate]> {
     let mut stations: Box<[Aggregate]> = vec![
         Aggregate {
-            key: [59; 100],
+            key: None,
             hash: 0,
             min: -1000,
             max: 1000,
@@ -136,9 +136,9 @@ fn process_line(
     let mut station_ind = station_hsh as usize;
     loop {
         station_ind &= 16384 - 1;
-        if stations[station_ind].key == [59; 100] {
+        if stations[station_ind].key.is_none() {
             stations[station_ind] = Aggregate {
-                key: station,
+                key: Some(station),
                 hash: station_hsh,
                 min: temperature,
                 max: temperature,
@@ -146,7 +146,7 @@ fn process_line(
                 count: 1,
             };
             break;
-        } else if stations[station_ind].key == station {
+        } else if stations[station_ind].key == Some(station) {
             let current_agg = &stations[station_ind];
             stations[station_ind] = Aggregate {
                 key: current_agg.key,
@@ -170,11 +170,11 @@ fn merge_stations(
     stations2: Box<[Aggregate]>,
 ) -> Box<[Aggregate]> {
     for station in stations2.iter() {
-        if station.key != [59; 100] {
+        if station.key.is_some() {
             let mut station_ind = station.hash as usize;
             loop {
                 station_ind &= 16384 - 1;
-                if stations1[station_ind].key == [59; 100] {
+                if stations1[station_ind].key.is_none() {
                     stations1[station_ind] = *station;
                     break;
                 } else if stations1[station_ind].key == station.key {
@@ -204,7 +204,7 @@ fn print_output(stations: &[Aggregate]) {
     let mut is_first = true;
     output_vec.sort_by(|a, b| a.key.cmp(&b.key));
     for station in output_vec {
-        if station.key == [59; 100] {
+        if station.key.is_none() {
             continue;
         }
 
@@ -219,13 +219,14 @@ fn print_output(stations: &[Aggregate]) {
         let mean = station.acc as f32 / station.count as f32 / 10.0;
 
         let mut right_bound = 100;
-        for i in 0..station.key.len() {
-            if station.key[i] == b';' {
+        let station_key = station.key.unwrap();
+        for i in 0..station_key.len() {
+            if station_key[i] == b';' {
                 right_bound = i;
                 break;
             }
         }
-        let station = unsafe { std::str::from_utf8_unchecked(&station.key[..right_bound]) };
+        let station = unsafe { std::str::from_utf8_unchecked(&station_key[..right_bound]) };
         print!("{station}={mn:.1}/{mean:.1}/{mx:.1}");
     }
     print!("}}");
